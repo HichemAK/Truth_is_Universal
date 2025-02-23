@@ -6,7 +6,6 @@ from glob import glob
 import random
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-ACTS_BATCH_SIZE = 25
 
 def collect_acts(dataset_name, model_family, model_size,
                   model_type, layer, center=True, scale=False, device='cpu'):
