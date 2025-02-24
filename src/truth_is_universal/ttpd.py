@@ -25,8 +25,6 @@ def load_dataset(dataset_name) -> tuple[list[str], list[int], list[float]]:
     polarities = [polarity]*len(labels)
     return statements, labels, polarities, len(labels)
 
-def extract_layers(model) -> torch.nn.Module:
-    pass
 
 def collect_activations(model, tokenizer, statements : list[str], device) -> torch.Tensor:
     inp = tokenizer(statements, return_tensors='pt', padding=True).to(device)
@@ -153,14 +151,17 @@ class TTPD:
     def build(self, batch_size: int, force=False) -> None:
         if self.is_built() and not force:
             raise Exception("TTDP Truth Directions were already computed for the model %s \n Use force=True to rebuild and replace previous vectors" % self.model_name)
-        
+        if force:
+            self.destroy()
         # Step 1: Collect activations
-        model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map=self.device_map, torch_dtype=self.torch_dtype)
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        tokenizer.padding_side = 'left'
-        tokenizer.pad_token = tokenizer.eos_token
+        if self.model is None:
+            self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map=self.device_map, torch_dtype=self.torch_dtype)
+        if self.tokenizer is None:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer.padding_side = 'left'
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        device = next(model.named_parameters())[1].device
+        device = next(self.model.named_parameters())[1].device
 
         dataset_list = ["cities", "neg_cities", "sp_en_trans", "neg_sp_en_trans", "inventors", "neg_inventors", "animal_class",
                   "neg_animal_class", "element_symb", "neg_element_symb", "facts", "neg_facts"]
@@ -168,7 +169,7 @@ class TTPD:
         batched_statements_iter = batched(statements, batch_size)
         activations = []
         for batch in tqdm(batched_statements_iter, "Generating activations", total=len(statements) // batch_size):
-            acts = collect_activations(model, tokenizer, batch, device)
+            acts = collect_activations(self.model, self.tokenizer, batch, device)
             activations.append(acts)
 
         activations = torch.cat(activations, dim=0)
@@ -176,7 +177,7 @@ class TTPD:
         # Step 2: Find best layer
         labels = np.array(labels)
         best_layer_datasets = ['cities', 'neg_cities', 'sp_en_trans', 'neg_sp_en_trans']
-        cumsum_sizes = np.array(dataset_sizes).cumsum ()
+        cumsum_sizes = np.array(dataset_sizes).cumsum()
         mask = np.zeros(activations.shape[0], dtype=np.bool)
         for ds in best_layer_datasets:
             idx = dataset_list.index(ds)
@@ -193,7 +194,8 @@ class TTPD:
 
         # Step 3: Compute truth directions
         activations_best_layer = activations[:, best_layer].float()
-        activations_best_layer_centered = center_activations(activations_best_layer, dataset_sizes)
+        # activations_best_layer_centered = center_activations(activations_best_layer, dataset_sizes)
+        activations_best_layer_centered = activations_best_layer - activations_best_layer.mean(0)
         labels = torch.tensor(labels)
         polarities = torch.tensor(polarities)
         regressor = TTPDRegressor.from_data(activations_best_layer_centered, activations_best_layer, labels, polarities)
@@ -214,11 +216,11 @@ class TTPD:
         if self.model is None:
             self.model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map=self.device_map, torch_dtype=self.torch_dtype)
         if self.tokenizer is None:
-            tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        tokenizer.padding_side = 'left'
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.tokenizer.padding_side = 'left'
         device = next(self.model.named_parameters().values()).device
 
-        outputs = collect_activations(self.model, tokenizer, statements, device)
+        outputs = collect_activations(self.model, self.tokenizer, statements, device)
         activations = outputs[:, self.best_layer]
         proj_t_g = activations @ self.t_g
         proj_p = activations @ self.t_p.T
