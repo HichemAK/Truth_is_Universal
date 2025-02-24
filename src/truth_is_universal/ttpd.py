@@ -2,6 +2,7 @@ import glob
 import json
 import os
 import os.path as osp
+import shutil
 from typing import Iterable
 import numpy as np
 import torch
@@ -11,7 +12,7 @@ import pandas as pd
 from .regressor import TTPD as TTPDRegressor
 
 
-STORAGE_FOLDER = os.envrion.get('STORAGE_FOLDER', "./")
+STORAGE_FOLDER = os.environ.get('STORAGE_FOLDER', "./")
 
 def load_dataset(dataset_name) -> tuple[list[str], list[int], list[float]]:
     """
@@ -28,8 +29,9 @@ def extract_layers(model) -> torch.nn.Module:
     pass
 
 def collect_activations(model, tokenizer, statements : list[str], device) -> torch.Tensor:
-    inp = tokenizer(statements, return_tensors='pt')
-    acts = model(inp.input_ids, activation_mask=inp.activation_mask, output_hidden_states=True).hidden_states[:,-1].cpu()
+    inp = tokenizer(statements, return_tensors='pt', padding=True).to(device)
+    hs = torch.stack(model(inp.input_ids, attention_mask=inp.attention_mask, output_hidden_states=True).hidden_states, dim=1)
+    acts = hs[:,1:,-1].cpu()
     return acts
 
 def load_statements(datasets: str | list[str]) -> tuple[Iterable[str], list[int], list[str]]:
@@ -53,11 +55,11 @@ def load_statements(datasets: str | list[str]) -> tuple[Iterable[str], list[int]
     all_statements, all_labels, all_polarities  = [],[],[]
     
     for dataset in datasets:
-        for statements, labels, polarities, size in load_dataset(dataset):
-            datasets_sizes.append(size)
-            all_statements.extend(statements)
-            all_labels.extend(labels)
-            all_polarities.extend(polarities)
+        statements, labels, polarities, size = load_dataset(dataset)
+        datasets_sizes.append(size)
+        all_statements.extend(statements)
+        all_labels.extend(labels)
+        all_polarities.extend(polarities)
     return all_statements, all_labels, all_polarities, datasets, datasets_sizes
 
 def batched(iterable : Iterable, batch_size: int) -> Iterable[list]:
@@ -107,6 +109,16 @@ def center_activations(activations: torch.Tensor, dataset_sizes: list[int]) -> t
         activations[start:end] = activations[start:end] - activations[start:end].mean(0).unsqueeze(0)
     return activations
 
+class NpEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super(NpEncoder, self).default(obj)
+
 class TTPD:
     FOLDER_NAME = "TTPDTruthDirections"
     def __init__(self, model_name : str, precision=16, model=None, tokenizer=None, device_map="auto"):
@@ -123,7 +135,7 @@ class TTPD:
 
     @property
     def path(self) -> str:
-        return osp.join(STORAGE_FOLDER, TTPD.FOLDER_NAME, "vectors__%s.json" % self.model_name)
+        return osp.join(STORAGE_FOLDER, TTPD.FOLDER_NAME, "vectors__%s.json" % self.model_name.replace("/", "_"))
 
     def is_built(self) -> bool:
         return osp.exists(self.path)
@@ -146,8 +158,9 @@ class TTPD:
         model = AutoModelForCausalLM.from_pretrained(self.model_name, device_map=self.device_map, torch_dtype=self.torch_dtype)
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         tokenizer.padding_side = 'left'
+        tokenizer.pad_token = tokenizer.eos_token
 
-        device = next(model.named_parameters().values()).device
+        device = next(model.named_parameters())[1].device
 
         dataset_list = ["cities", "neg_cities", "sp_en_trans", "neg_sp_en_trans", "inventors", "neg_inventors", "animal_class",
                   "neg_animal_class", "element_symb", "neg_element_symb", "facts", "neg_facts"]
@@ -164,7 +177,7 @@ class TTPD:
         labels = np.array(labels)
         best_layer_datasets = ['cities', 'neg_cities', 'sp_en_trans', 'neg_sp_en_trans']
         cumsum_sizes = np.array(dataset_sizes).cumsum ()
-        mask = np.zeros(activations.shape, dtype=np.bool)
+        mask = np.zeros(activations.shape[0], dtype=np.bool)
         for ds in best_layer_datasets:
             idx = dataset_list.index(ds)
             start = cumsum_sizes[idx]
@@ -174,22 +187,26 @@ class TTPD:
         best_layer_labels = labels[mask]
         layer2perf = compute_layer2perf(best_layer_activations, best_layer_labels)
         best_layer = np.argmax(layer2perf)
+        print("Layer2perf")
+        print(layer2perf)
+        print("Best layer index : %s" % best_layer)
 
         # Step 3: Compute truth directions
-        activations_best_layer = activations[:, best_layer]
+        activations_best_layer = activations[:, best_layer].float()
         activations_best_layer_centered = center_activations(activations_best_layer, dataset_sizes)
-        
+        labels = torch.tensor(labels)
+        polarities = torch.tensor(polarities)
         regressor = TTPDRegressor.from_data(activations_best_layer_centered, activations_best_layer, labels, polarities)
 
         # Step 4: Save truth directions
-        t_g, t_p = regressor.t_g.tolist(), regressor.polarity_direc.tolist()
-
+        t_g, t_p = regressor.t_g.tolist(), regressor.polarity_direc[0].tolist()
+        os.makedirs(osp.dirname(self.path), exist_ok=True)
         with open(self.path, "w") as f:
             json.dump({
                 "truth": t_g,
                 "polarity": t_p,
                 "best_layer": best_layer 
-            }, f)
+            }, f, cls=NpEncoder)
         print("Truth directions saved in %s" % self.path)
         print("Build finished!")
 
@@ -207,3 +224,6 @@ class TTPD:
         proj_p = activations @ self.t_p.T
         acts_2d = torch.cat((proj_t_g[:, None], proj_p), dim=1)
         return acts_2d
+
+    def destroy(self) -> None:
+        shutil.rmtree(osp.dirname(self.path), ignore_errors=True)

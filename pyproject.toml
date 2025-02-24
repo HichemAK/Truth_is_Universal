@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "accelerate>=1.4.0",
     "pandas>=2.2.3",
     "scikit-learn>=1.6.1",
     "torch>=2.0.0",
@@ -20,6 +21,3 @@ truth-is-universal = "truth_is_universal:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/truth-is-universal"]
