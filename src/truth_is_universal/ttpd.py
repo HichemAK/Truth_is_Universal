@@ -8,7 +8,7 @@ import torch
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import pandas as pd
-from .regressor import TTPD as TTPDRegressor, learn_truth_directions
+from .regressor import TTPD as TTPDRegressor
 
 
 STORAGE_FOLDER = os.envrion.get('STORAGE_FOLDER', "./")
